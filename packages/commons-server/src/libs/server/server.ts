@@ -31,7 +31,15 @@ import {
 } from 'https';
 import killable from 'killable';
 import { lookup as mimeTypeLookup } from 'mime-types';
-import { basename, extname, isAbsolute, relative, resolve, sep } from 'path';
+import {
+  basename,
+  extname,
+  isAbsolute,
+  parse,
+  relative,
+  resolve,
+  sep
+} from 'path';
 import { parse as qsParse } from 'qs';
 import { SecureContextOptions } from 'tls';
 import TypedEmitter from 'typed-emitter';
@@ -1245,7 +1253,9 @@ export class MockoonServer extends (EventEmitter as new () => TypedEmitter<Serve
    *
    * If the path is absolute, it must stay within its original static base
    * directory (last folder separator before the first {{...}})
-   * If the path is relative, it must stay within the environment base directory
+   * If the path is relative, it must stay within its static base directory, or
+   * the environment base directory when the path has no static base
+   * The allowed base directory cannot be the file system root
    *
    * @param filePath
    * @param request
@@ -1268,6 +1278,8 @@ export class MockoonServer extends (EventEmitter as new () => TypedEmitter<Serve
         !isAbsolute(relativePath)
       );
     };
+    // the file system root ('/', 'C:\', '\\server\share\') cannot be used to confine a templated path
+    const isFileSystemRoot = (path: string) => path === parse(path).root;
     // Convert backslashes to forward slashes (Windows compatibility)
     const rawFilePath = filePath.replace(/\\/g, '/');
 
@@ -1281,7 +1293,7 @@ export class MockoonServer extends (EventEmitter as new () => TypedEmitter<Serve
 
     // Extract static base directory from templated string (last folder separator before the first {{...}})
     const staticBaseMatch = rawFilePath.match(/^([^{}]*\/)/);
-    const staticBaseDir = staticBaseMatch
+    const staticBaseDir = staticBaseMatch?.[1]
       ? resolvePath(staticBaseMatch[1])
       : null;
 
@@ -1296,21 +1308,22 @@ export class MockoonServer extends (EventEmitter as new () => TypedEmitter<Serve
     // Determine if the path is absolute or relative
     const isPathAbsolute = isAbsolute(parsedFilePath);
     const resolvedPath = resolvePath(parsedFilePath);
+    // Templated paths must stay within their static base, relative paths without static base within the environment base directory
+    const allowedBaseDir =
+      staticBaseDir ?? (!isPathAbsolute ? environmentDirectory : null);
 
-    if (isPathAbsolute) {
-      // Absolute paths must stay within their original static base
-      if (!staticBaseDir || !isPathInsideBase(staticBaseDir, resolvedPath)) {
-        throw new Error(
-          `Access to absolute path outside of the original static base directory (${resolvedPath})`
-        );
-      }
-    } else {
-      // Relative paths must stay within the environment base directory
-      if (!isPathInsideBase(environmentDirectory, resolvedPath)) {
-        throw new Error(
-          `Access to relative path outside of the environment base directory (${resolvedPath})`
-        );
-      }
+    if (!allowedBaseDir || isFileSystemRoot(allowedBaseDir)) {
+      throw new Error(
+        `Templated file path requires a non-root base directory (${resolvedPath})`
+      );
+    }
+
+    if (!isPathInsideBase(allowedBaseDir, resolvedPath)) {
+      throw new Error(
+        isPathAbsolute
+          ? `Access to absolute path outside of the original static base directory (${resolvedPath})`
+          : `Access to relative path outside of the allowed base directory (${resolvedPath})`
+      );
     }
 
     return resolvedPath;
